@@ -4,8 +4,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-
 from openai import OpenAI
+
+import pandas as pd  # para leer el Excel
+
 
 def cargar_instrucciones() -> str:
     """
@@ -24,7 +26,7 @@ def cargar_instrucciones() -> str:
 
 def leer_pdf_modelo() -> str:
     """
-    Lee el archivo PDF de ejemplo ubicado en pdfs/leccion_modelo.pdf
+    Lee el archivo PDF de ejemplo ubicado en pdfs/TS_WeDo_L01.pdf
     y devuelve todo el texto extraído.
     """
     ruta_base = Path(__file__).parent
@@ -43,74 +45,79 @@ def leer_pdf_modelo() -> str:
     return texto
 
 
-def probar_llamada_openai(instrucciones: str, texto_pdf: str):
+def leer_lecciones_desde_excel(nombre_archivo: str = "Ejemplo.xlsx") -> list[dict]:
     """
-    Realiza una prueba de conexión con OpenAI usando tus instrucciones
-    y un fragmento del PDF modelo.
+    Lee el archivo Excel con los datos de las lecciones.
+    Devuelve una lista de diccionarios, uno por lección.
     """
-    client = OpenAI()  # lee la API key desde el .env
+    ruta_base = Path(__file__).parent
+    ruta_excel = ruta_base / nombre_archivo
 
-    prompt_usuario = f"""
-Usa las siguientes instrucciones como guía:
+    if not ruta_excel.exists():
+        raise FileNotFoundError(f"No se encontró el Excel: {ruta_excel}")
 
-{instrucciones}
+    # header=1 -> usa la segunda fila como nombres de columna
+    df = pd.read_excel(ruta_excel, header=1)
 
-Ahora, basándote en el siguiente fragmento del PDF modelo:
+    # Elimina filas totalmente vacías (por si hay espacios al final)
+    df = df.dropna(how="all")
 
-\"\"\"{texto_pdf[:1000]}\"\"\"
-
-Genera un texto breve (no una lección completa), solamente explicando
-en 3 líneas cómo aplicarías la metodología CEAEC en una lección de prueba.
-"""
-
-    respuesta = client.chat.completions.create(
-        model="gpt-5.1",
-        messages=[
-            {"role": "system", "content": "Eres un experto en robótica educativa con LEGO."},
-            {"role": "user", "content": prompt_usuario},
-        ],
-        temperature=0.4,
-        max_completion_tokens=300,
-    )
-
-    return respuesta.choices[0].message.content
+    # Convierte a lista de dicts
+    lecciones = df.to_dict(orient="records")
+    return lecciones
 
 
-def generar_leccion_ceaec(instrucciones: str, texto_pdf: str) -> str:
+def generar_leccion_ceaec(instrucciones: str, texto_pdf: str, datos: dict, client: OpenAI) -> str:
     """
     Genera una lección completa CEAEC usando:
     - Instrucciones del archivo Instrucciones_LEGO.txt
     - Fragmento del PDF modelo
-    - Datos propios de la tabla de la lección
+    - Datos de UNA fila del Excel (diccionario 'datos')
     """
 
-    client = OpenAI()
+    # Extraemos campos desde el diccionario 'datos'.
+    leccion_num = datos.get("Lección", "")
+    titulo_leccion = datos.get("Título de la lección", "")
+    identificador = datos.get("Identificador", "")
+    tipo = datos.get("Tipo", "PRIMARIA BAJA")  # si no hay columna "Tipo", usamos este valor por defecto
+    area_contenido = datos.get("Área de contenido", "")
+    tema = datos.get("Tema", "")
+    recursos_digitales = datos.get("Recursos digitales", "")
+    materiales = datos.get("Materiales", "")
+    contenidos = datos.get("Contenidos", "")
+    objetivos = datos.get("Objetivos de aprendizaje", "")
+    habilidades = datos.get("Habilidades", "")
+    competencia_steam = datos.get("Competencia STEAM", "")
+    act_exploracion = datos.get("Actividad de exploración", "")
+    act_complementaria_base = datos.get("Actividad complementaria", "")
+
+    # Para no hacer el prompt gigantesco, recortamos un poco el PDF
+    fragmento_pdf = texto_pdf[:2500]
 
     prompt_usuario = f"""
 {instrucciones}
 
-Analiza la siguiente información para crear la lección 2 de Robótica con LEGO. 
-El grado es PRIMARIA BAJA.
+Analiza la siguiente información para crear la lección {leccion_num} de Robótica con LEGO. 
+El grado es {tipo}.
 
 ===========================
 DATOS DE LA LECCIÓN:
 ===========================
 
-Lección: 2  
-Título de la lección: Pateador  
-Identificador: TS_WeDo_L02  
-Área de contenido: Ciencia, Ingeniería  
-Tema: Robots que reaccionan a estímulos  
-Recursos digitales: Software WeDo 2.0  
-Materiales: Kit Educativo compatible con WeDo 2.0  
-Contenidos: Engranajes y sensor de proximidad  
-Objetivos de aprendizaje: Activar un mecanismo de patada cuando el robot detecta un objeto cercano  
-Habilidades: Pensamiento crítico, experimentación, trabajo colaborativo  
+Lección: {leccion_num}  
+Título de la lección: {titulo_leccion}  
+Identificador: {identificador}  
+Área de contenido: {area_contenido}  
+Tema: {tema}  
+Recursos digitales: {recursos_digitales}  
+Materiales: {materiales}  
+Contenidos: {contenidos}  
+Objetivos de aprendizaje: {objetivos}  
+Habilidades: {habilidades}  
 Competencia STEAM:
-- Ciencia: sensores y reacciones
-- Ingeniería: transmisión de movimiento
-Actividad de exploración: Colocar un objeto frente al sensor para activar la patada  
-Actividad complementaria base: Cambiar el tamaño de los engranajes para que la patada sea más fuerte o más suave  
+{competencia_steam}
+Actividad de exploración: {act_exploracion}  
+Actividad complementaria base: {act_complementaria_base}  
 
 ===========================
 INSTRUCCIONES GENERALES:
@@ -154,20 +161,30 @@ No desarrolladas, solo descritas en modo imperativo para el alumno.
 
 Ahora complementa todo lo anterior con el estilo del siguiente fragmento del PDF:
 
-\"\"\"{texto_pdf[:2500]}\"\"\"
+\"\"\"{fragmento_pdf}\"\"\"
 """
 
-    respuesta = client.chat.completions.create(
-        model="gpt-5.1",
-        messages=[
-            {"role": "system", "content": "Eres un experto en diseño de lecciones LEGO con metodología CEAEC."},
-            {"role": "user", "content": prompt_usuario},
-        ],
-        temperature=0.4,
-        max_completion_tokens=3500,
-    )
+    try:
+        respuesta = client.responses.create(
+            model="gpt-5.1",
+            input=[
+                {"role": "system", "content": "Eres un experto en diseño de lecciones LEGO con metodología CEAEC."},
+                {"role": "user", "content": prompt_usuario},
+            ],
+            max_output_tokens=3000,
+        )
+    except Exception as e:
+        print("❌ Error al llamar a la API de OpenAI:", repr(e))
+        return ""
 
-    return respuesta.choices[0].message.content
+    # Extraer el texto del objeto 'responses'
+    texto_salida = ""
+    for item in respuesta.output:
+        for bloque in item.content:
+            if getattr(bloque, "type", "") == "output_text":
+                texto_salida += bloque.text
+
+    return texto_salida
 
 
 def main():
@@ -177,44 +194,52 @@ def main():
 
     if not api_key:
         print("⚠️ No se encontró OPENAI_API_KEY en el archivo .env")
-    else:
-        print("✅ Entorno listo. OPENAI_API_KEY detectada.")
+        return
+
+    client = OpenAI(api_key=api_key)
+    print("✅ Entorno listo. OPENAI_API_KEY detectada.")
 
     # 2) Leer el archivo de instrucciones LEGO
     instrucciones = cargar_instrucciones()
-    print("\n✅ Instrucciones_LEGO.txt leído correctamente.")
-    print("Vista previa (primeros 300 caracteres):\n")
-    print(instrucciones[:300])
+    print("✅ Instrucciones_LEGO.txt leído correctamente.")
     print("\n" + "=" * 60 + "\n")
 
     # 3) Leer el PDF de la lección modelo
     texto_pdf = leer_pdf_modelo()
-    print("✅ PDF leccion_modelo.pdf leído correctamente.")
-    print("Vista previa del PDF (primeros 500 caracteres):\n")
-    print(texto_pdf[:500])
+    print("✅ PDF TS_WeDo_L01.pdf leído correctamente.")
 
+    # 4) Leer las lecciones desde el Excel
+    lecciones = leer_lecciones_desde_excel("Ejemplo.xlsx")
+    print(f"✅ Excel leído correctamente. Se encontraron {len(lecciones)} lección(es).")
     print("\n" + "=" * 60)
-    print("🔍 Probando conexión con OpenAI...")
 
-    respuesta = probar_llamada_openai(instrucciones, texto_pdf)
+    # 5) Generar una lección CEAEC por cada fila del Excel
+    for datos_leccion in lecciones:
+        leccion_num = datos_leccion.get("Lección", "")
+        identificador = datos_leccion.get(
+            "Identificador",
+            f"L{int(leccion_num):02}" if leccion_num != "" else "LXX"
+        )
+        titulo_leccion = datos_leccion.get("Título de la lección", "Sin_título")
 
-    print("\n✅ Respuesta de OpenAI:")
-    print(respuesta)
+        print(f"🚀 Generando lección CEAEC para la lección {leccion_num}: {titulo_leccion}...")
 
-    # 4) Generar la lección completa con metodología CEAEC
-    print("\n" + "=" * 60)
-    print("🚀 Generando lección completa CEAEC para la lección 2: Pateador...")
+        leccion_completa = generar_leccion_ceaec(instrucciones, texto_pdf, datos_leccion, client)
 
-    leccion_completa = generar_leccion_ceaec(instrucciones, texto_pdf)
+        if not leccion_completa.strip():
+            print("⚠️ La lección generada está vacía. No se guardará archivo.")
+            continue
 
-    # Guardar la lección en un archivo Markdown
-    nombre_archivo_salida = "L02_Pateador_PrimariaBaja_CEAEC.md"
+        # Crear un nombre de archivo razonable, usando el identificador si existe
+        nombre_base = identificador if identificador else f"L{leccion_num}"
+        nombre_archivo_salida = f"{nombre_base}_CEAEC.md"
 
-    with open(nombre_archivo_salida, "w", encoding="utf-8") as f:
-        f.write(leccion_completa)
+        with open(nombre_archivo_salida, "w", encoding="utf-8") as f:
+            f.write(leccion_completa)
 
-    print(f"\n✅ Lección generada y guardada en: {nombre_archivo_salida}")
-    print("Puedes abrir ese archivo en VS Code para revisarla con calma.")
+        print(f"   ✅ Lección generada y guardada en: {nombre_archivo_salida}")
+
+    print("\n🎉 Proceso terminado. Revisa los archivos .md generados.")
 
 
 if __name__ == "__main__":
