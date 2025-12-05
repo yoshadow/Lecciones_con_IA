@@ -1,7 +1,7 @@
 # main.py
 import os
+import base64
 from pathlib import Path
-
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from openai import OpenAI
@@ -45,7 +45,31 @@ def leer_pdf_modelo() -> str:
     return texto
 
 
-def leer_lecciones_desde_excel(nombre_archivo: str = "Ejemplo.xlsx") -> list[dict]:
+def cargar_imagen_base64(ruta_imagen: Path) -> str:
+    """
+    Carga una imagen y la devuelve como string base64 tipo data URL,
+    lista para usar con la API de OpenAI (input_image).
+    """
+    if not ruta_imagen.exists():
+        raise FileNotFoundError(f"No se encontró la imagen: {ruta_imagen}")
+
+    with ruta_imagen.open("rb") as img:
+        b64 = base64.b64encode(img.read()).decode("utf-8")
+
+    # Detectar tipo MIME simple por extensión
+    ext = ruta_imagen.suffix.lower()
+    if ext in [".jpg", ".jpeg"]:
+        mime = "image/jpeg"
+    elif ext == ".png":
+        mime = "image/png"
+    else:
+        # por defecto
+        mime = "image/png"
+
+    return f"data:{mime};base64,{b64}"
+
+
+def leer_lecciones_desde_excel(nombre_archivo: str = "Tabla.xlsx") -> list[dict]:
     """
     Lee el archivo Excel con los datos de las lecciones.
     Devuelve una lista de diccionarios, uno por lección.
@@ -67,7 +91,7 @@ def leer_lecciones_desde_excel(nombre_archivo: str = "Ejemplo.xlsx") -> list[dic
     return lecciones
 
 
-def generar_leccion_ceaec(instrucciones: str, texto_pdf: str, datos: dict, client: OpenAI) -> str:
+def generar_leccion_ceaec(instrucciones: str, texto_pdf: str, datos: dict, client: OpenAI, imagen_exploro_dataurl: str | None = None,) -> str:
     """
     Genera una lección completa CEAEC usando:
     - Instrucciones del archivo Instrucciones_LEGO.txt
@@ -92,7 +116,7 @@ def generar_leccion_ceaec(instrucciones: str, texto_pdf: str, datos: dict, clien
     act_complementaria_base = datos.get("Actividad complementaria", "")
 
     # Para no hacer el prompt gigantesco, recortamos un poco el PDF
-    fragmento_pdf = texto_pdf[:2500]
+    fragmento_pdf = texto_pdf[:3000]
 
     prompt_usuario = f"""
 {instrucciones}
@@ -123,20 +147,22 @@ Actividad complementaria base: {act_complementaria_base}
 INSTRUCCIONES GENERALES:
 ===========================
 
-Genera una propuesta de lección completa siguiendo EXACTAMENTE las etapas de la metodología CEAEC.
+Genera una lección completa siguiendo EXACTAMENTE las etapas de la metodología CEAEC.
 Desarrolla todas las etapas como si estuvieran escritas en un LIBRO DEL ALUMNO.
 
-Incluye:
+La ACTIVIDAD 1 de la etapa EXPLORO debe basarse específicamente en el programa/proyecto que aparece en la imagen adjunta.
 
-1. Una TABLA INICIAL con:
-   - Número de lección
-   - Título de la lección
-   - Identificador
-   - Nivel
-   - Objetivo
-   - Habilidades
-   - Materiales (texto fijo):
-     “Kit de robótica educativa con ladrillos y Software WeDo 2.0”
+Incluye al inicio:
+
+Una TABLA INICIAL con:
+ - Número de lección
+ - Título de la lección
+ - Identificador
+ - Nivel
+ - Objetivo
+ - Habilidades
+ - Materiales
+ - Recursos digitales
 
 ===========================
 SECCIÓN DEL PROFESOR:
@@ -159,17 +185,32 @@ No desarrolladas, solo descritas en modo imperativo para el alumno.
 
 ===========================
 
-Ahora complementa todo lo anterior con el estilo del siguiente fragmento del PDF:
+Estilo general similar al siguiente fragmento del PDF:
 
 \"\"\"{fragmento_pdf}\"\"\"
 """
+    # Contenido combinado: texto + (opcional) imagen
+    contenido_usuario = [
+        {"type": "input_text", "text": prompt_usuario},
+    ]
+
+    if imagen_exploro_dataurl:
+        contenido_usuario.append(
+            {
+                "type": "input_image",
+                "image_url": imagen_exploro_dataurl,
+            }
+        )
 
     try:
         respuesta = client.responses.create(
             model="gpt-5.1",
+            instructions="Eres un experto en diseño de lecciones LEGO con metodología CEAEC.",
             input=[
-                {"role": "system", "content": "Eres un experto en diseño de lecciones LEGO con metodología CEAEC."},
-                {"role": "user", "content": prompt_usuario},
+                {
+                    "role": "user",
+                    "content": contenido_usuario,
+                }
             ],
             max_output_tokens=3000,
         )
@@ -177,14 +218,8 @@ Ahora complementa todo lo anterior con el estilo del siguiente fragmento del PDF
         print("❌ Error al llamar a la API de OpenAI:", repr(e))
         return ""
 
-    # Extraer el texto del objeto 'responses'
-    texto_salida = ""
-    for item in respuesta.output:
-        for bloque in item.content:
-            if getattr(bloque, "type", "") == "output_text":
-                texto_salida += bloque.text
-
-    return texto_salida
+    # Atajo del SDK: todo el texto junto
+    return respuesta.output_text or ""
 
 
 def main():
@@ -206,10 +241,10 @@ def main():
 
     # 3) Leer el PDF de la lección modelo
     texto_pdf = leer_pdf_modelo()
-    print("✅ PDF TS_WeDo_L01.pdf leído correctamente.")
+    print("✅ PDF leído correctamente.")
 
     # 4) Leer las lecciones desde el Excel
-    lecciones = leer_lecciones_desde_excel("Ejemplo.xlsx")
+    lecciones = leer_lecciones_desde_excel("Tabla.xlsx")
     print(f"✅ Excel leído correctamente. Se encontraron {len(lecciones)} lección(es).")
     print("\n" + "=" * 60)
 
@@ -222,9 +257,22 @@ def main():
         )
         titulo_leccion = datos_leccion.get("Título de la lección", "Sin_título")
 
+        # Leer el nombre de la imagen desde el Excel (columna "Imagen exploro")
+        nombre_imagen = (datos_leccion.get("Imagen exploro") or datos_leccion.get("Imagen Exploro") or "")
+
+        # Si hay nombre de imagen, la cargamos desde la carpeta /imagenes
+        imagen_dataurl = None
+        if nombre_imagen:
+            ruta_img = Path(__file__).parent / "imagenes" / str(nombre_imagen)
+            try:
+                imagen_dataurl = cargar_imagen_base64(ruta_img)
+            except FileNotFoundError as e:
+                print(f"⚠️ {e}. Se generará la lección sin imagen para Exploro 1.")
+
         print(f"🚀 Generando lección CEAEC para la lección {leccion_num}: {titulo_leccion}...")
 
-        leccion_completa = generar_leccion_ceaec(instrucciones, texto_pdf, datos_leccion, client)
+        # Aquí pasamos la imagen a la función (nuevo parámetro)
+        leccion_completa = generar_leccion_ceaec(instrucciones, texto_pdf, datos_leccion, client, imagen_exploro_dataurl=imagen_dataurl,)
 
         if not leccion_completa.strip():
             print("⚠️ La lección generada está vacía. No se guardará archivo.")
